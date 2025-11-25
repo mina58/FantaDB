@@ -1,14 +1,20 @@
 package org.FantaDB.LibFanta.KV.Storage;
 
+import org.jetbrains.annotations.NotNull;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Iterator;
 
-public class FileAppendOnlyStorage implements AppendOnlyStorage {
+public class FileAppendOnlyStorage implements AppendOnlyStorage, Iterable<StorageRecordOffset> {
     private final FileChannel channel;
     private final StorageRecordCodec codec =  new StorageRecordCodec();
+
+    private record ReadResult(StorageRecord record, int sizeBytes) {
+    }
 
     public FileAppendOnlyStorage(Path path) throws IOException {
         this.channel = FileChannel.open(
@@ -37,6 +43,53 @@ public class FileAppendOnlyStorage implements AppendOnlyStorage {
 
     @Override
     public StorageRecord read(long offset) throws IOException {
+        return readFromOffset(offset).record;
+    }
+
+    @Override
+    public void flush() throws IOException {
+        channel.force(true);
+    }
+
+    @Override
+    public void close() throws IOException {
+        channel.close();
+    }
+
+    @Override
+    public @NotNull Iterator<StorageRecordOffset> iterator() {
+        return new Iterator<> () {
+            private long position = 0;
+            private long fileSize;
+
+            {
+                try {
+                    fileSize = channel.size();
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to get file size from channel", e);
+                }
+            }
+
+            @Override
+            public boolean hasNext() {
+                return position < fileSize;
+            }
+
+            @Override
+            public StorageRecordOffset next() {
+                try {
+                    ReadResult readResult = readFromOffset(position);
+                    StorageRecordOffset result = new StorageRecordOffset(position, readResult.record());
+                    position += 4 + readResult.sizeBytes();
+                    return result;
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to read record at offset " + position, e);
+                }
+            }
+        };
+    }
+
+    private ReadResult readFromOffset(long offset) throws IOException {
         channel.position(offset);
 
         ByteBuffer lenBuffer = ByteBuffer.allocate(4);
@@ -48,16 +101,7 @@ public class FileAppendOnlyStorage implements AppendOnlyStorage {
         channel.read(recordBuffer);
         recordBuffer.flip();
 
-        return codec.deserialize(recordBuffer);
-    }
-
-    @Override
-    public void flush() throws IOException {
-        channel.force(true);
-    }
-
-    @Override
-    public void close() throws IOException {
-        channel.close();
+        StorageRecord record = codec.deserialize(recordBuffer);
+        return new ReadResult(record, recordLength);
     }
 }
